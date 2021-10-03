@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -18,33 +20,38 @@ extern char trampoline[]; // trampoline.S
 /*
  * create a direct-map page table for the kernel.
  */
+
+pagetable_t kvmmake();
+
 void
 kvminit()
 {
-  kernel_pagetable = (pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
+  //kernel_pagetable = (pagetable_t) kalloc();
+  //memset(kernel_pagetable, 0, PGSIZE);
+  kernel_pagetable=kvmmake();
 
   // uart registers
-  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  //kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface
-  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  //kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
-
+  //kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  mappages(kernel_pagetable, CLINT, 0x10000, CLINT, PTE_R | PTE_W);
+  
   // PLIC
-  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  //kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
 
   // map kernel text executable and read-only.
-  kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  //kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
 
   // map kernel data and the physical RAM we'll make use of.
-  kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  //kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
 
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
-  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  //kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -132,7 +139,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernelpagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -373,12 +380,26 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   return 0;
 }
 
+pagetable_t kvmmake()
+{
+	pagetable_t kernel_pagetable=(pagetable_t) kalloc();
+	memset(kernel_pagetable, 0, PGSIZE);
+	mappages(kernel_pagetable, UART0, PGSIZE, UART0, PTE_R | PTE_W);
+	mappages(kernel_pagetable, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W);
+	mappages(kernel_pagetable, PLIC, 0x400000, PLIC, PTE_R | PTE_W);
+	mappages(kernel_pagetable, KERNBASE, (uint64)etext-KERNBASE, KERNBASE, PTE_R | PTE_X);
+	mappages(kernel_pagetable, (uint64)etext, PHYSTOP-(uint64)etext, (uint64)etext, PTE_R | PTE_W);
+	mappages(kernel_pagetable, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X);
+	return kernel_pagetable;
+}
+
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  /*
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -396,6 +417,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     srcva = va0 + PGSIZE;
   }
   return 0;
+*/
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -405,6 +428,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+/*
   uint64 n, va0, pa0;
   int got_null = 0;
 
@@ -439,4 +463,38 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+*/
+  return copyinstr_new(pagetable, dst, srcva, max);
+}
+void
+travel(pagetable_t pagetable, int level)
+{
+	for(int i=0; i<512; ++i)
+	{
+		pte_t pte=pagetable[i];
+		if(pte&PTE_V)
+		{
+			uint64 child=PTE2PA(pte);
+			if(level==0)
+			{
+				printf("..%d: pte %p pa %p\n", i, pte, child);
+				travel((pagetable_t)child, level+1);
+			}
+			else if(level==1)
+			{
+				printf(".. ..%d: pte %p pa %p\n", i, pte, child);
+				travel((pagetable_t)child, level+1);
+			}
+			else
+				printf(".. .. ..%d: pte %p pa %p\n", i, pte, child);
+		}
+	}
+}
+				
+
+void
+vmprint(pagetable_t pagetable)
+{
+	printf("page table %p\n", pagetable);
+	travel(pagetable, 0);
 }

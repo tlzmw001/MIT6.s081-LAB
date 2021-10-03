@@ -9,6 +9,8 @@
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
 
+extern pte_t* walk(pagetable_t pagetable, uint64 va, int alloc);
+
 int
 exec(char *path, char **argv)
 {
@@ -20,6 +22,7 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  pte_t *pte, *kernelpte;
 
   begin_op();
 
@@ -34,6 +37,8 @@ exec(char *path, char **argv)
     goto bad;
   if(elf.magic != ELF_MAGIC)
     goto bad;
+
+
 
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
@@ -51,6 +56,9 @@ exec(char *path, char **argv)
     uint64 sz1;
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
+    if(sz1>=PLIC){
+	goto bad;
+    }
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
@@ -96,7 +104,13 @@ exec(char *path, char **argv)
     goto bad;
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
-
+uvmunmap(p->kernelpagetable, 0, PGROUNDUP(oldsz)/PGSIZE, 0);
+for(int j=0; j<sz; j+=PGSIZE)
+  {
+	pte=walk(pagetable, j, 0);
+	kernelpte=walk(p->kernelpagetable, j, 1);
+	*kernelpte=(*pte) & ~PTE_U;
+  }
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
   // value, which goes in a0.
@@ -116,6 +130,8 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  if(p->pid==1)
+	vmprint(p->pagetable);
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
